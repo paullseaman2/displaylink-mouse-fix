@@ -87,29 +87,28 @@ echo "  Installed /usr/local/bin/mouse-recover"
 
 # --- Install mouse-watchdog ---
 echo ""
-echo "=== Installing mouse-watchdog ==="
+echo "=== Installing mouse-watchdog v3 ==="
 
-cat > /usr/local/bin/mouse-watchdog << 'WATCHDOG_SCRIPT'
+# Write config section with detected hardware values
+cat > /usr/local/bin/mouse-watchdog << WATCHDOG_CONFIG
 #!/bin/bash
-# Background watchdog: detects mouse HID stall and auto-recovers
-# When the mouse was recently producing events and suddenly stops
-# while still connected at USB level, rebind the HID driver.
+# Mouse HID stall watchdog v3
+# Monitors for real USB HID stalls (not just idle mouse).
+# Only recovers when USB error counters increase or event device vanishes.
+# Fixes v1/v2 feedback loop where idle mouse triggered constant rebinds.
 
 LOG_TAG="mouse-watchdog"
-WATCHDOG_SCRIPT
-
-# Append the config with actual values (not escaped)
-cat >> /usr/local/bin/mouse-watchdog << WATCHDOG_CONFIG
 MOUSE_IF0="${MOUSE_IF0}"
 MOUSE_IF1="${MOUSE_IF1}"
-MOUSE_SYS_PATH="/sys/bus/usb/devices/${MOUSE_DEV}"
 DRIVER="/sys/bus/usb/drivers/usbhid"
 EVENT_DEV="${EVENT_PATTERN}"
+MOUSE_SYS="/sys/bus/usb/devices/${MOUSE_DEV}"
 WATCHDOG_CONFIG
 
+# Append the logic (no variable expansion)
 cat >> /usr/local/bin/mouse-watchdog << 'WATCHDOG_BODY'
 
-logger -t "$LOG_TAG" "Watchdog started (mouse at $MOUSE_IF0)"
+logger -t "$LOG_TAG" "Watchdog v3 started"
 
 recover_mouse() {
     logger -t "$LOG_TAG" "Stall detected — rebinding HID driver"
@@ -118,58 +117,74 @@ recover_mouse() {
     sleep 0.3
     echo "$MOUSE_IF0" > "$DRIVER/bind" 2>/dev/null
     echo "$MOUSE_IF1" > "$DRIVER/bind" 2>/dev/null
-    sleep 1
     logger -t "$LOG_TAG" "Recovery complete"
 }
 
-# State tracking
-LAST_EVENT_TIME=0
-LAST_BYTES=0
-STALL_CHECKS=0
+get_usb_errors() {
+    local errs=0
+    local files
+    files=$(ls "$MOUSE_SYS"/ep_*/errors 2>/dev/null)
+    for f in $files; do
+        if [ -r "$f" ]; then
+            errs=$((errs + $(cat "$f" 2>/dev/null || echo 0)))
+        fi
+    done
+    for iface in "$MOUSE_IF0" "$MOUSE_IF1"; do
+        local epath="/sys/bus/usb/devices/$iface"
+        local ifiles
+        ifiles=$(ls "$epath"/ep_*/errors 2>/dev/null)
+        for f in $ifiles; do
+            if [ -r "$f" ]; then
+                errs=$((errs + $(cat "$f" 2>/dev/null || echo 0)))
+            fi
+        done
+    done
+    echo "$errs"
+}
+
+LAST_ERRORS=$(get_usb_errors)
+LAST_RECOVER=0
+COOLDOWN=10  # minimum seconds between recoveries
 
 while true; do
-    sleep 1
+    sleep 2
 
-    # Is USB device present?
-    if [ ! -d "$MOUSE_SYS_PATH" ]; then
-        STALL_CHECKS=0
-        LAST_EVENT_TIME=0
-        continue
-    fi
-
-    # Is the event device there?
-    if [ ! -e "$EVENT_DEV" ]; then
-        # USB present but no event device — try recovery
-        recover_mouse
-        STALL_CHECKS=0
-        continue
-    fi
-
-    # Try to read any event data (non-blocking, 0.5s timeout)
-    BYTES=$(timeout 0.5 dd if="$EVENT_DEV" of=/dev/null bs=24 count=1 2>&1 | grep -o '[0-9]* bytes' | head -1 | grep -o '[0-9]*')
-    BYTES=${BYTES:-0}
     NOW=$(date +%s)
 
-    if [ "$BYTES" -gt 0 ]; then
-        # Mouse is alive and producing events
-        LAST_EVENT_TIME=$NOW
-        STALL_CHECKS=0
-    else
-        # No events in this window
-        if [ "$LAST_EVENT_TIME" -gt 0 ]; then
-            SILENT=$((NOW - LAST_EVENT_TIME))
-            # Mouse was recently active (within 10 sec) but now silent
-            if [ "$SILENT" -ge 2 ] && [ "$SILENT" -le 10 ]; then
-                STALL_CHECKS=$((STALL_CHECKS + 1))
-                if [ "$STALL_CHECKS" -ge 2 ]; then
-                    recover_mouse
-                    STALL_CHECKS=0
-                    LAST_EVENT_TIME=0
-                fi
-            elif [ "$SILENT" -gt 10 ]; then
-                # User probably just not using mouse — reset
-                STALL_CHECKS=0
-            fi
+    # Is USB device present?
+    if [ ! -d "$MOUSE_SYS" ]; then
+        continue
+    fi
+
+    # Check 1: Event device vanished while USB is present — definite stall
+    if [ ! -e "$EVENT_DEV" ]; then
+        if [ $((NOW - LAST_RECOVER)) -ge "$COOLDOWN" ]; then
+            logger -t "$LOG_TAG" "Event device gone while USB present"
+            recover_mouse
+            LAST_RECOVER=$NOW
+        fi
+        continue
+    fi
+
+    # Check 2: USB error counters increased — endpoint stall
+    CUR_ERRORS=$(get_usb_errors)
+    if [ "$CUR_ERRORS" -gt "$LAST_ERRORS" ]; then
+        if [ $((NOW - LAST_RECOVER)) -ge "$COOLDOWN" ]; then
+            logger -t "$LOG_TAG" "USB errors increased ($LAST_ERRORS -> $CUR_ERRORS)"
+            recover_mouse
+            LAST_RECOVER=$NOW
+        fi
+        LAST_ERRORS=$CUR_ERRORS
+        continue
+    fi
+    LAST_ERRORS=$CUR_ERRORS
+
+    # Check 3: dmesg shows endpoint halt/stall in last few seconds
+    if dmesg --time-format iso 2>/dev/null | tail -20 | grep -qi "endpoint.*halt\|cannot submit.*urb\|device not responding" 2>/dev/null; then
+        if [ $((NOW - LAST_RECOVER)) -ge "$COOLDOWN" ]; then
+            logger -t "$LOG_TAG" "USB stall in dmesg"
+            recover_mouse
+            LAST_RECOVER=$NOW
         fi
     fi
 done

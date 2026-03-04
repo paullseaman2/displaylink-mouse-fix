@@ -54,7 +54,7 @@ This installs:
 ## Usage
 
 ### Automatic (recommended)
-After install, the watchdog runs in the background. If your mouse stalls, it should recover automatically within ~3 seconds. Check it's running:
+After install, the watchdog (v3) runs in the background. It monitors for real USB HID stalls using endpoint error counters and event device status — it will **not** false-trigger when you simply stop moving your mouse. If your mouse stalls, it should recover automatically within a few seconds. Check it's running:
 
 ```bash
 systemctl status mouse-watchdog
@@ -111,6 +111,16 @@ grep -r "MOUSE\|mouse" /sys/bus/usb/devices/*/product 2>/dev/null
 ```
 
 Then edit the `MOUSE_IF0` and `MOUSE_IF1` variables in the installed scripts.
+
+## Watchdog v3 — How It Detects Stalls
+
+Earlier versions tried to read mouse events directly, which caused false positives (idle mouse looks identical to stalled mouse) and created a feedback loop of constant driver rebinds. v3 uses three signals that only fire on real stalls:
+
+1. **Event device vanishes** while USB device is still present — the kernel removed the input device
+2. **USB endpoint error counters increase** — hardware-level stall confirmation
+3. **dmesg reports endpoint halt** or URB submission failure
+
+A 10-second cooldown between recoveries prevents cascading rebinds.
 
 ## What Doesn't Work
 

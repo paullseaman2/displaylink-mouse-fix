@@ -112,15 +112,18 @@ grep -r "MOUSE\|mouse" /sys/bus/usb/devices/*/product 2>/dev/null
 
 Then edit the `MOUSE_IF0` and `MOUSE_IF1` variables in the installed scripts.
 
-## Watchdog v3 — How It Detects Stalls
+## Watchdog v3.1 — How It Detects Stalls
 
-Earlier versions tried to read mouse events directly, which caused false positives (idle mouse looks identical to stalled mouse) and created a feedback loop of constant driver rebinds. v3 uses three signals that only fire on real stalls:
+Earlier versions had problems:
+- **v1/v2**: Tried to read mouse events with a 2-second timeout. Idle mouse (user typing) looked identical to a stalled mouse, causing constant false-positive recoveries that themselves caused freezes — a feedback loop.
+- **v3**: Switched to hardware-only checks (USB error counters, event device removal, dmesg). But on some hardware the event device stays present during a stall and no error counters exist, so real stalls were missed entirely.
 
-1. **Event device vanishes** while USB device is still present — the kernel removed the input device
-2. **USB endpoint error counters increase** — hardware-level stall confirmation
-3. **dmesg reports endpoint halt** or URB submission failure
+**v3.1** is a hybrid — it monitors events but with safe thresholds:
+1. **Event device vanishes** while USB is present — instant recovery
+2. **Event silence detection** — if the mouse was active within the last 30 seconds but has been silent for 8+ seconds, AND 3 consecutive checks confirm it (6 seconds of verification), trigger recovery
+3. **15-second cooldown** between recoveries prevents cascading rebinds
 
-A 10-second cooldown between recoveries prevents cascading rebinds.
+This means a real stall recovers in ~14 seconds, but normal idle periods (typing, reading) don't trigger false positives.
 
 ## What Doesn't Work
 

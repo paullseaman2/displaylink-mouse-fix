@@ -87,17 +87,16 @@ echo "  Installed /usr/local/bin/mouse-recover"
 
 # --- Install mouse-watchdog ---
 echo ""
-echo "=== Installing mouse-watchdog v3.1 ==="
+echo "=== Installing mouse-watchdog v3.2 ==="
 
 # Write config section with detected hardware values
 cat > /usr/local/bin/mouse-watchdog << WATCHDOG_CONFIG
 #!/bin/bash
-# Mouse HID stall watchdog v3.1
-# Hybrid: event monitoring with safe thresholds + hardware checks.
-# v2 false-triggered on idle mouse (2s threshold). v3 missed stalls because
-# event device stays present and no USB error counters exist on some hardware.
-# v3.1: monitors events but requires 8s silence after recent activity,
-# confirmed by 3 consecutive checks, with 15s cooldown to prevent loops.
+# Mouse HID stall watchdog v3.2
+# Tuned for faster recovery (~5s vs v3.1's ~14s).
+# v3.1 was safe but slow: 8s silence + 3 confirms at 2s = ~14s.
+# v3.2: 4s silence + 2 confirms at 1s = ~5s. 8s cooldown still prevents
+# the feedback loop that killed v2 (where rebind itself caused a stall).
 
 LOG_TAG="mouse-watchdog"
 MOUSE_IF0="${MOUSE_IF0}"
@@ -110,7 +109,7 @@ WATCHDOG_CONFIG
 # Append the logic (no variable expansion)
 cat >> /usr/local/bin/mouse-watchdog << 'WATCHDOG_BODY'
 
-logger -t "$LOG_TAG" "Watchdog v3.1 started"
+logger -t "$LOG_TAG" "Watchdog v3.2 started"
 
 recover_mouse() {
     logger -t "$LOG_TAG" "Stall detected — rebinding HID driver"
@@ -129,11 +128,11 @@ echo "0" > "$LAST_EVENT_FILE"
 monitor_events() {
     while true; do
         if [ -e "$EVENT_DEV" ]; then
-            if timeout 2 dd if="$EVENT_DEV" of=/dev/null bs=24 count=1 2>/dev/null; then
+            if timeout 1 dd if="$EVENT_DEV" of=/dev/null bs=24 count=1 2>/dev/null; then
                 date +%s > "$LAST_EVENT_FILE"
             fi
         else
-            sleep 2
+            sleep 1
         fi
     done
 }
@@ -143,14 +142,14 @@ MONITOR_PID=$!
 trap "kill $MONITOR_PID 2>/dev/null; rm -f $LAST_EVENT_FILE; exit" EXIT TERM INT
 
 LAST_RECOVER=0
-COOLDOWN=15
+COOLDOWN=8
 STALL_COUNT=0
-SILENCE_THRESHOLD=8   # seconds of silence before suspecting stall
+SILENCE_THRESHOLD=4   # seconds of silence before suspecting stall
 ACTIVITY_WINDOW=30    # only suspect stall if mouse was active within this many seconds
-STALL_CONFIRM=3       # consecutive failed checks needed to confirm stall
+STALL_CONFIRM=2       # consecutive failed checks needed to confirm stall
 
 while true; do
-    sleep 2
+    sleep 1
 
     NOW=$(date +%s)
 

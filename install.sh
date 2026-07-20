@@ -11,6 +11,12 @@
 
 set -e
 
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: This must be run as root." >&2
+    echo "  sudo bash install.sh" >&2
+    exit 1
+fi
+
 # --- Auto-detect mouse ---
 echo "=== Detecting USB mouse ==="
 

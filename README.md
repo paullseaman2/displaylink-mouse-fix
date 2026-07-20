@@ -37,6 +37,8 @@ If your computer has a USB port that connects directly to the motherboard (not t
 
 Check `lsusb -t` — if your mouse is under a hub that's also under the DisplayLink device, that's the shared TT causing your problem.
 
+**This is confirmed in long-run use, not just theory.** I moved my mouse to a direct port and removed the watchdog, `mouse-recover`, and all recovery tooling entirely (2026-07-20). Same dock, same monitors, same alt-tab habits, same kernel. Zero freezes since. Everything else — video, ethernet, audio — stays on the dock; only the mouse moved. That the stall disappears when the mouse leaves the shared TT, while nothing else changes, is the strongest evidence for the TT diagnosis above.
+
 ### Software fix: HID driver rebind (when you can't avoid the dock)
 
 If all your USB ports go through the dock (common on laptops with only one port), the workaround is to **unbind and rebind the HID driver.** This restarts interrupt polling on the stalled endpoint and the mouse immediately comes back — no physical unplug needed.
@@ -110,17 +112,33 @@ Likely affects:
 
 ## Customization
 
-The scripts assume your mouse is at USB path `1-1.2.4` through a hub at `1-1.2`. If your hardware is different, find your mouse path:
+`install.sh` auto-detects your mouse's USB path at install time and writes it into the generated scripts — you don't normally need to edit anything. It prints what it found:
 
-```bash
-lsusb -t
-# Look for your mouse (1.5M or 12M HID device)
-
-# Or find it by vendor ID:
-grep -r "MOUSE\|mouse" /sys/bus/usb/devices/*/product 2>/dev/null
+```
+  Mouse:     USB OPTICAL MOUSE (18f8:0f99)
+  USB path:  1-1.2.4
 ```
 
-Then edit the `MOUSE_IF0` and `MOUSE_IF1` variables in the installed scripts.
+### ⚠️ The detected path is baked in at install time
+
+**If you later move the mouse to a different port, the scripts keep pointing at the old path and silently stop working.** They don't error — the watchdog hits its "device not present" branch and no-ops on every iteration, so it still looks healthy in `systemctl status` while doing nothing at all.
+
+This happened to me. I took the README's own advice and moved my mouse off the dock (`1-1.2.4`) onto the laptop (`1-2`). The watchdog then did nothing for two months and I didn't notice — harmless only because the port move had already fixed the underlying problem.
+
+So: **if you follow the "best fix" above, uninstall this.** You don't need it anymore, and leaving it running just hides the fact that it's inert.
+
+To check whether yours is actually doing anything:
+
+```bash
+journalctl -t mouse-watchdog | grep -c "Stall detected"
+```
+
+Zero, over a period where you'd have expected freezes, means the watchdog isn't what's keeping your mouse alive. If you moved ports and still want it, re-run `sudo bash install.sh` to re-detect. To find your current path manually:
+
+```bash
+lsusb -t                                                       # your mouse (1.5M or 12M HID device)
+grep -rl "mouse" /sys/bus/usb/devices/*/product 2>/dev/null    # or by product string
+```
 
 ## Watchdog v3.2 — How It Detects Stalls
 
@@ -147,11 +165,17 @@ Things we tried that **did NOT fix this**:
 - Unbinding/rebinding the USB hub driver (wrong layer — need HID, not USB)
 - eBPF/HID-BPF (operates above USB transport, can't detect URB non-completion)
 
+One warning if you're tempted to roll your own recovery: an early version of my setup used a udev rule that rebound the mouse's **parent hub** on disconnect. Don't do this. Once the mouse moved ports, the rule started resetting an unrelated internal hub — the one carrying the Bluetooth adapter — on every mouse unplug. `install.sh` here does not do this; it installs autosuspend rules only, and the HID rebind targets the mouse's own interfaces rather than any hub.
+
 ## Why the Kernel Doesn't Self-Recover
 
 The HID driver (`hid-core.c`) has proper error handling for every URB failure code — stalls, protocol errors, timeouts. But in this scenario, the URB **never completes at all**. The TT silently drops the transfer, no error is reported, `hid_irq_in()` is never called, and `HID_IN_RUNNING` stays set. The driver thinks everything is fine. There is no timeout on pending interrupt URBs in the kernel's HID driver.
 
 A [February 2026 LKML patch](https://lkml.org/lkml/2026/2/8/329) ("usbhid: tolerate intermittent errors") is being reviewed by USB maintainers and may improve upstream handling of related failure modes.
+
+## Status
+
+Not actively developed. The root-cause analysis is the durable value here and I believe it still holds — but I no longer run the software fix myself, because moving the mouse off the dock made it unnecessary. Issues and PRs welcome; responses may be slow.
 
 ## License
 
